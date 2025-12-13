@@ -4,6 +4,8 @@ agent_the_destroyer_of_universes
 expert_1
 expert_2
 coin_collector_agent
+hung_ry_agent
 rule_based_agent
 the_second_agent_to_rule_them_all
-agent_fred2 (이름바꿔도됨)
+agent_fred2
+feature_is_everything
