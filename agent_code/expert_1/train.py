@@ -10,8 +10,8 @@ from typing import List
 import numpy as np
 
 import events as e
-from agent_code.coli_agent.callbacks import ACTIONS, Action, state_to_features
-from agent_code.coli_agent.plots import get_plots
+from agent_code.expert_1.callbacks import ACTIONS, Action, state_to_features
+from agent_code.expert_1.plots import get_plots
 
 Transition = namedtuple("Transition", ("state", "action", "next_state", "reward"))
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event
 from time import time
 from typing import List, Tuple, Dict
+import os
 
 import numpy as np
 
@@ -338,12 +339,20 @@ class BombeRLeWorld(GenericWorld):
     def setup_agents(self, agents):
         # Add specified agents and start their subprocesses
         self.agents = []
-        for agent_dir, train in agents:
-            if list([d for d, t in agents]).count(agent_dir) > 1:
-                name = agent_dir + '_' + str(list([a.code_name for a in self.agents]).count(agent_dir))
-            else:
-                name = agent_dir
-            self.add_agent(agent_dir, name, train=train)
+        
+        # [수정된 부분: 팀 식별을 위한 이름 강제 규칙 적용]
+        # agents 리스트의 순서를 기준으로 Team ID를 부여합니다.
+        # 0, 1번 인덱스 -> Team 1
+        # 2, 3번 인덱스 -> Team 2
+        
+        for i, (agent_dir, train) in enumerate(agents):
+            team_id = 1 if i < 2 else 2
+            
+            # 고유 이름 생성: Team{ID}_{AgentDir}_{Index}
+            # 예: Team1_my_agent_0, Team2_stop_agent_3
+            unique_name = f"Team{team_id}_{agent_dir}_{i}"
+            
+            self.add_agent(agent_dir, unique_name, train=train)
 
     def build_arena(self):
         WALL = -1
@@ -497,7 +506,15 @@ class BombeRLeWorld(GenericWorld):
         # Save course of the game for future replay
         if self.args.save_replay:
             self.replay['n_steps'] = self.step
-            name = f'replays/{self.round_id}.pt' if self.args.save_replay is True else self.args.save_replay
+            
+            # [수정] 윈도우 호환 파일명을 위해 특수문자 치환
+            safe_round_id = self.round_id.replace('|', '_').replace(':', '-').replace(' ', '_')
+            
+            name = f'replays/{safe_round_id}.pt' if self.args.save_replay is True else self.args.save_replay
+            
+            # replays 폴더가 없으면 생성하는 안전장치 추가 (선택사항)
+            os.makedirs(os.path.dirname(name), exist_ok=True)
+            
             with open(name, 'wb') as f:
                 pickle.dump(self.replay, f)
 

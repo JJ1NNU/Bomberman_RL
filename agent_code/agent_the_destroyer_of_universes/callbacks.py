@@ -3,10 +3,14 @@ import os
 import pickle
 import random
 import torch
-
 import numpy as np
 import math as m
+import sys
 from operator import itemgetter
+from collections import deque
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+from action_prune import get_filtered_actions
 
 ACTIONS = ['UP', 'RIGHT', 'DOWN', 'LEFT', 'WAIT', 'BOMB']
 
@@ -45,21 +49,83 @@ def setup(self):
         with open("my-saved-model_ohne_batchnorm_neuer_reward5.pt", "rb") as file:
             self.model = pickle.load(file)
 
+    self.coordinate_history = deque(maxlen=20)
+    self.step = 0
+
 
 def act(self, game_state: dict) -> str:
     """
     Your agent should parse the input, think, and take a decision.
-    When not in training mode, the maximum execution time for this method is 0.5s.
+    """
+    # -----------------------------------------------------------
+    # 1. [Prepare] 상태 갱신
+    # -----------------------------------------------------------
+    self.step = game_state['step']
+    self.x, self.y = game_state['self'][3]
 
-    :param self: The same object that is passed to all of your callbacks.
-    :param game_state: The dictionary that describes everything on the board.
-    :return: The action to take as a string.
+    # 좌표 히스토리 관리
+    if self.step == 1:
+        self.coordinate_history.clear()
+    self.coordinate_history.append((self.x, self.y))
+
+    # -----------------------------------------------------------
+    # 2. [Intent] 모델에게 원래 의도 물어보기 (기존 로직)
+    # -----------------------------------------------------------
+    raw_action = _choose_action(self, game_state)
+
+    # -----------------------------------------------------------
+    # 3. [Early Game Check] & [Safety Shield]
+    # -----------------------------------------------------------
+    # 경기 초반 (30스텝 이전)에는 안전장치 비활성화
+    if self.step < 30:
+        # [주의] 초반이라도 자폭/팀킬 방지를 위해 최소한의 체크가 필요할 수 있으나,
+        # 일단 기준에 맞춰 Shield OFF
+        final_action = raw_action
+    else:
+        # 30스텝 이후 Safety Shield 작동
+        try:
+            safe_actions = get_filtered_actions(game_state)
+        except Exception as e:
+            # 에러 발생 시 로그 찍고 원본 행동 유지 (여기선 logger가 없으므로 print)
+            print(f"Safety Shield Error: {e}")
+            safe_actions = [raw_action]
+            
+        # -----------------------------------------------------------
+        # 4. [Loop Breaker] (30스텝 이후)
+        # -----------------------------------------------------------
+        is_looping = False
+        is_safe_now = 'WAIT' in safe_actions # WAIT가 안전하다는 건 급박하지 않다는 뜻
+        
+        if is_safe_now and len(self.coordinate_history) >= 10:
+            history_list = list(self.coordinate_history)
+            recent_locs = set(history_list[-10:])
+            # 최근 10턴 동안 2개 이하의 좌표만 방문했다면 루프
+            if len(recent_locs) <= 2:
+                is_looping = True
+        
+        final_action = raw_action
+        
+        # 루프 탈출 또는 위험 행동 차단
+        if is_looping or (raw_action not in safe_actions):
+            if is_looping:
+                pass # 루프 감지됨 (로그 없음)
+            
+            if safe_actions:
+                safe_moves = [a for a in safe_actions if a != 'WAIT']
+                if safe_moves:
+                    final_action = np.random.choice(safe_moves)
+                else:
+                    final_action = np.random.choice(safe_actions)
+            else:
+                final_action = 'WAIT'
+
+    return final_action
+
+def _choose_action(self, game_state: dict) -> str:
+    """
+    기존 act 함수의 핵심 로직을 분리한 함수
     """
     x1, x2, x3, x4 = state_to_features(game_state)
-    #print(game_state["explosion_map"], game_state["explosion_map"][2, 1])
-    #print(game_state["field"])
-    #print(game_state["field"].T)
-    #print(game_state["self"][3])
 
     if self.train:
         eps_start = 0.9
@@ -67,24 +133,21 @@ def act(self, game_state: dict) -> str:
         eps_decay = 1000
         round = 1
         sample = random.random()
-        eps_threshold = 0.01 # eps_start - (eps_start - eps_end) * m.exp(-eps_decay / round)  # higher -> more random
+        eps_threshold = 0.01 
 
         if sample > eps_threshold:
             round += 1
             with torch.no_grad():
-                # t.max(1) will return the largest column value of each row.
-                # second column on max result is index of where max element was
-                # found, so we pick action with the larger expected reward.
                 action_done = torch.argmax(self.policy_net(x1, x2, x3, x4))
         else:
             round += 1
             action_done = torch.tensor([[np.random.choice([i for i in range(0, 6)], p=[.2, .2, .2, .2, .1, .1])]],
                                        dtype=torch.long, device=device)
     else:
+        # 평가 모드
         action_done = torch.argmax(self.model(x1, x2, x3, x4))
-
+    
     return ACTIONS[action_done]
-
 
 def state_to_features(game_state: dict) -> np.array:
     field = game_state["field"]

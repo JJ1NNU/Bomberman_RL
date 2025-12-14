@@ -267,16 +267,12 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
         plt.title("Sum of Rewards after each Round")
         plt.xlabel("Round")
         plt.ylabel("Sum of Rewards")
-        path = "C:\\Eigene Dateien\\Studium\\10.Semester\\MLEssentials\\Projekt\\Git\\bomberman_MLE_homework\\agent_code\\agent_the_destroyer_of_worlds\\plots\\"
-        fig.savefig(path + "rewards_" + time.strftime("%Y-%m-%d %H%M%S") + ".png")
 
         fig = plt.figure()
         plt.plot(self.memory.scores)
         plt.title("Score at the End of each Round")
         plt.xlabel("Round")
         plt.ylabel("Score")
-        path = "C:\\Eigene Dateien\\Studium\\10.Semester\\MLEssentials\\Projekt\\Git\\bomberman_MLE_homework\\agent_code\\agent_the_destroyer_of_worlds\\plots\\"
-        fig.savefig(path + "scores_" + time.strftime("%Y-%m-%d %H%M%S") + ".png")
 
         self.memory.rounds = reward_len
     

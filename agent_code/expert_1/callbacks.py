@@ -1,13 +1,17 @@
 import glob
 import itertools
 import os
+import sys
+from collections import deque
 from copy import deepcopy
 from datetime import datetime
 from typing import List, Tuple
-
 import networkx as nx
 import numpy as np
 from sympy import exp, solve, symbols
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+from action_prune import get_filtered_actions
 
 from settings import COLS, ROWS
 
@@ -22,7 +26,6 @@ SHORTEST_PATH_ACTIONS = ACTIONS[:4]
 
 def setup(self) -> None:
     """Sets up everything. (First call)"""
-
     self.new_state = None
     self.lattice_graph = nx.grid_2d_graph(m=COLS, n=ROWS)
     self.state_list = list_possible_states()
@@ -31,41 +34,156 @@ def setup(self) -> None:
     self.q_table_fraction_unseen = []
     self.q_table_average_seen = []
     self.q_table_distribution_of_actions = []
-
     self.exploration_rates_of_episodes = []
     self.rewards_of_episodes = []
     self.game_scores_of_episodes = []
+    
+    # [추가] Loop Breaker 및 좌표 추적을 위한 초기화
+    self.coordinate_history = deque(maxlen=20)
+    self.step = 0
+    # [추가] exploration_rate가 정의되지 않았을 경우를 대비한 안전장치
+    if not hasattr(self, 'exploration_rate'):
+        self.exploration_rate = 0.0
 
     # find latest q_table
     list_of_q_tables = glob.glob("./q_tables/*.npy")
-    self.latest_q_table_path = max(list_of_q_tables, key=os.path.getctime)
-    self.latest_q_table = np.load(self.latest_q_table_path)
-
-    self.logger.info(f"Using q-table: {self.latest_q_table_path}")
+    # (주의: 파일이 없으면 max에서 에러날 수 있으므로 체크)
+    if list_of_q_tables:
+        self.latest_q_table_path = max(list_of_q_tables, key=os.path.getctime)
+        self.latest_q_table = np.load(self.latest_q_table_path)
+        self.logger.info(f"Using q-table: {self.latest_q_table_path}")
+    else:
+        self.latest_q_table_path = "" # 빈 문자열로 초기화
 
     # train if flag is present or if there is no q_table present
-    if self.train or not os.path.isfile(self.latest_q_table_path):
+    if self.train or (not list_of_q_tables and not os.path.isfile(self.latest_q_table_path)):
         self.logger.info("Setting up Q-Learning algorithm")
         self.timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         self.number_of_states = len(self.state_list)
-
         self.exploration_rate_initial = 1.0
         self.exploration_rate_end = 0.1  # at end of all episodes
-
         self.exploration_decay_rate = _determine_exploration_decay_rate(self)
 
-        if self.continue_training:
+        if hasattr(self, 'continue_training') and self.continue_training and list_of_q_tables:
             self.logger.info("Continuing training on latest q_table")
             self.q_table = self.latest_q_table
-
         else:
             self.logger.info("Starting training from scratch")
             self.q_table = np.zeros(shape=(self.number_of_states, len(ACTIONS)))
-
+            # [수정] 훈련 시작 시 exploration rate 초기화
+            self.exploration_rate = self.exploration_rate_initial
     else:
         self.logger.info("Using latest Q-Table for testing")
-        self.q_table = self.latest_q_table
+        if list_of_q_tables:
+             self.q_table = self.latest_q_table
+        else:
+             # Fallback for testing without model
+             self.logger.warning("No Q-Table found for testing! Using random agent.")
+             self.q_table = np.zeros(shape=(len(self.state_list), len(ACTIONS)))
+        self.exploration_rate = 0.0 # 테스트 모드에서는 탐험 없음
 
+def act(self, game_state: dict) -> str:
+    """Takes in the current game state and returns the chosen action in form of a string."""
+    
+    # -----------------------------------------------------------
+    # 1. [Prepare] 상태 갱신
+    # -----------------------------------------------------------
+    self.step = game_state['step']
+    self.x, self.y = game_state['self'][3]
+
+    # 좌표 히스토리 관리
+    if self.step == 1:
+        self.coordinate_history.clear()
+    self.coordinate_history.append((self.x, self.y))
+
+    # Q-Learning State Update
+    if self.new_state is None:  # is always None in test case
+        self.old_state = state_to_features(self, game_state)
+    else:  # in train case this is set in game_events_occured
+        self.old_state = self.new_state
+    
+    # -----------------------------------------------------------
+    # 2. [Intent] 모델에게 원래 의도 물어보기
+    # -----------------------------------------------------------
+    raw_action = _choose_action(self, game_state, self.old_state)
+
+    # -----------------------------------------------------------
+    # 3. [Early Game Check] & [Safety Shield]
+    # -----------------------------------------------------------
+    if self.step < 30:
+        self.logger.info(f"Early Game (Step {self.step}): Safety Shield is OFF.")
+        final_action = raw_action
+    else:
+        # 30스텝 이후 Safety Shield 작동
+        try:
+            safe_actions = get_filtered_actions(game_state)
+        except Exception as e:
+            self.logger.error(f"Safety Shield Error: {e}")
+            safe_actions = [raw_action]
+            
+        # -----------------------------------------------------------
+        # 4. [Loop Breaker] (30스텝 이후)
+        # -----------------------------------------------------------
+        is_looping = False
+        is_safe_now = 'WAIT' in safe_actions
+        
+        if is_safe_now and len(self.coordinate_history) >= 10:
+            history_list = list(self.coordinate_history)
+            recent_locs = set(history_list[-10:])
+            if len(recent_locs) <= 2:
+                is_looping = True
+        
+        final_action = raw_action
+        
+        # 루프 탈출 또는 위험 행동 차단
+        if is_looping or (raw_action not in safe_actions):
+            if is_looping:
+                self.logger.info("Loop detected in SAFE state. Forcing random move.")
+            
+            if safe_actions:
+                safe_moves = [a for a in safe_actions if a != 'WAIT']
+                if safe_moves:
+                    final_action = np.random.choice(safe_moves)
+                else:
+                    final_action = np.random.choice(safe_actions)
+            else:
+                final_action = 'WAIT'
+
+    # [로그] 최종 행동 결정 로그
+    if final_action != raw_action:
+        self.logger.info(f"Safety Shield Triggered! Intent: {raw_action} -> Adjusted: {final_action}")
+    else:
+        self.logger.debug(f"Action execute: {final_action}")
+
+    return final_action
+
+def _choose_action(self, game_state: dict, state: int) -> str:
+    """
+    기존 act 함수의 Q-Learning 선택 로직을 분리
+    """
+    # only for logging because here is the easiest place to access this info
+    safe_coins = [
+        coin
+        for coin in game_state["coins"]
+        if coin
+        not in [index for index, field in np.ndenumerate(game_state["explosion_map"]) if field != 0]
+    ]
+    self.logger.info(f"Current safe coins: {safe_coins}")
+    self.logger.info(f"Current self coord: {game_state['self'][-1]}")
+
+    # Exploration vs Exploitation
+    if self.train and np.random.random() < self.exploration_rate:
+        self.logger.info("Exploring")
+        action = np.random.choice(ACTIONS)
+        self.logger.info(f"Action chosen: {action}")
+        return action
+
+    self.logger.info("Exploiting")
+    self.logger.debug(f"State: {state}")
+    
+    # 100% exploitation
+    action = ACTIONS[np.argmax(self.q_table[state])]
+    return action
 
 def list_possible_states() -> List[dict]:
     """Creates a list of dicts of all possible state feature combinations (aka states)
@@ -123,51 +241,6 @@ def list_possible_states() -> List[dict]:
         }
         state_dicts.append(state_dict)
     return state_dicts
-
-
-def act(self, game_state: dict) -> str:
-    """Takes in the current game state and returns the chosen action in form of a string."""
-    if self.new_state is None:  # is always None in test case
-        self.old_state = state_to_features(self, game_state)
-    else:  # in train case this is set in game_events_occured
-        self.old_state = self.new_state
-    state = self.old_state
-
-    # only for logging because here is the easiest place to access this info
-    safe_coins = [
-        coin
-        for coin in game_state["coins"]
-        if coin
-        not in [index for index, field in np.ndenumerate(game_state["explosion_map"]) if field != 0]
-    ]
-    self.logger.info(f"Current safe coins: {safe_coins}")
-    self.logger.info(f"Current self coord: {game_state['self'][-1]}")
-
-    if self.train and np.random.random() < self.exploration_rate:
-        self.logger.info("Exploring")
-        action = np.random.choice(ACTIONS)
-        self.logger.info(f"Action chosen: {action}")
-        return action
-
-    self.logger.info("Exploiting")
-    self.logger.debug(f"State: {state}")
-
-    # 100% exploitation once we have learnt the q-table/exploit in training
-    action = ACTIONS[np.argmax(self.q_table[state])]
-
-    # Alternative: sample from the learnt q_table distribution.
-    # if not np.any(self.q_table[state]):
-    #     self.logger.debug("Q-Table has all zeros --> choosing random action")
-    #     action = np.random.choice(ACTIONS)
-    # else:
-    #     self.logger.debug("Sampling action from Q-Table")
-    #     lowest_q_value_of_state = np.min(self.q_table[state])
-    #     non_negative_q_table = self.q_table[state] + abs(lowest_q_value_of_state)
-    #     probabilities = [(q_value / sum(non_negative_q_table)) for q_value in non_negative_q_table]
-    #     action = np.random.choice(ACTIONS, p=probabilities)
-
-    self.logger.info(f"Action chosen: {action}")
-    return action
 
 
 def _determine_exploration_decay_rate(self) -> float:
