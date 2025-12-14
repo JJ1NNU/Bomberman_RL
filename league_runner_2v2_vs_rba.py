@@ -5,15 +5,11 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==========================================
-# [설정] 에이전트 풀 정의
+# [설정] 에이전트 풀 정의: 추가 학습이 가능한 에이전트들
 # ==========================================
 AGENT_POOL = [
-    "agent_the_destroyer_of_universes",
-    "expert_1",
     "expert_2",
-    "coin_collector_agent",
     "hung_ry_agent",
-    "rule_based_agent",
     "the_second_agent_to_rule_them_all",
     "agent_fred2",
     "feature_is_everything"
