@@ -50,6 +50,7 @@ def setup(self):
             self.model = pickle.load(file)
 
     self.coordinate_history = deque(maxlen=20)
+    self.action_history = deque(maxlen=20) 
     self.step = 0
 
 
@@ -63,61 +64,75 @@ def act(self, game_state: dict) -> str:
     self.step = game_state['step']
     self.x, self.y = game_state['self'][3]
 
-    # 좌표 히스토리 관리
+    # 좌표 및 행동 히스토리 관리 (매 라운드 초기화)
     if self.step == 1:
         self.coordinate_history.clear()
+        self.action_history.clear()
+        
     self.coordinate_history.append((self.x, self.y))
 
     # -----------------------------------------------------------
-    # 2. [Intent] 모델에게 원래 의도 물어보기 (기존 로직)
+    # 2. [Intent] 모델에게 원래 의도 물어보기
     # -----------------------------------------------------------
     raw_action = _choose_action(self, game_state)
 
-    # -----------------------------------------------------------
-    # 3. [Early Game Check] & [Safety Shield]
-    # -----------------------------------------------------------
-    # 경기 초반 (30스텝 이전)에는 안전장치 비활성화
-    if self.step < 30:
-        # [주의] 초반이라도 자폭/팀킬 방지를 위해 최소한의 체크가 필요할 수 있으나,
-        # 일단 기준에 맞춰 Shield OFF
-        final_action = raw_action
-    else:
-        # 30스텝 이후 Safety Shield 작동
-        try:
-            safe_actions = get_filtered_actions(game_state)
-        except Exception as e:
-            # 에러 발생 시 로그 찍고 원본 행동 유지 (여기선 logger가 없으므로 print)
-            print(f"Safety Shield Error: {e}")
-            safe_actions = [raw_action]
+    # [★ 추가] 상자 옆에서 멍때림 방지 (Deadlock Breaking with Bomb)
+    if game_state['self'][2] == True: # 폭탄 쿨타임 아님
+        # 최근 5턴간 폭탄을 놓지 않음
+        recent_actions = list(self.action_history)[-5:]
+        if len(recent_actions) >= 5 and all(a != 'BOMB' for a in recent_actions):
+            # 상자 확인
+            x, y = game_state['self'][3]
+            field = game_state['field']
+            neighbors = [(x, y-1), (x, y+1), (x-1, y), (x+1, y)]
+            crate_nearby = any(field[nx, ny] == 1 for nx, ny in neighbors if 0 <= nx < field.shape[0] and 0 <= ny < field.shape[1])
             
-        # -----------------------------------------------------------
-        # 4. [Loop Breaker] (30스텝 이후)
-        # -----------------------------------------------------------
-        is_looping = False
-        is_safe_now = 'WAIT' in safe_actions # WAIT가 안전하다는 건 급박하지 않다는 뜻
+            if crate_nearby:
+                try:
+                    # 안전 확인 (팀킬/자폭 방지)
+                    temp_safe_actions = get_filtered_actions(game_state, self.action_history)
+                    if 'BOMB' in temp_safe_actions:
+                        # print("Force BOMB placement: Stuck next to crate & Safe to bomb.")
+                        raw_action = 'BOMB'
+                except Exception as e:
+                    print(f"Bomb Check Error: {e}")
+
+    # -----------------------------------------------------------
+    # 3. [Safety Shield] & [Loop Breaker]
+    # -----------------------------------------------------------
+    # [수정] 30스텝 조건 제거 -> 항상 쉴드 켜짐
+    try:
+        # [수정] action_prune에 action_history 전달
+        safe_actions = get_filtered_actions(game_state, self.action_history)
+    except Exception as e:
+        print(f"Safety Shield Error: {e}")
+        safe_actions = ['WAIT']
         
-        if is_safe_now and len(self.coordinate_history) >= 10:
-            history_list = list(self.coordinate_history)
-            recent_locs = set(history_list[-10:])
-            # 최근 10턴 동안 2개 이하의 좌표만 방문했다면 루프
-            if len(recent_locs) <= 2:
-                is_looping = True
+    final_action = raw_action
+    
+    # 쉴드에 의해 원래 의도가 차단되었는지 확인
+    if raw_action not in safe_actions:
         
-        final_action = raw_action
+        # [수정] 이동 의도였다면 폭탄 제외
+        if raw_action != 'BOMB':
+            candidate_actions = [a for a in safe_actions if a != 'BOMB' and a != 'WAIT']
+        else:
+            candidate_actions = [a for a in safe_actions if a != 'WAIT']
+
+        # 후보 선택
+        if candidate_actions:
+            final_action = np.random.choice(candidate_actions)
+        elif 'WAIT' in safe_actions:
+            final_action = 'WAIT'
+        elif safe_actions: 
+            final_action = np.random.choice(safe_actions)
+        else:
+            final_action = 'WAIT'
+
+        # print(f"Safety Shield Triggered! Intent: {raw_action} -> Adjusted: {final_action}")
         
-        # 루프 탈출 또는 위험 행동 차단
-        if is_looping or (raw_action not in safe_actions):
-            if is_looping:
-                pass # 루프 감지됨 (로그 없음)
-            
-            if safe_actions:
-                safe_moves = [a for a in safe_actions if a != 'WAIT']
-                if safe_moves:
-                    final_action = np.random.choice(safe_moves)
-                else:
-                    final_action = np.random.choice(safe_actions)
-            else:
-                final_action = 'WAIT'
+    # [중요] 결정된 행동을 히스토리에 저장
+    self.action_history.append(final_action)
 
     return final_action
 
@@ -138,16 +153,43 @@ def _choose_action(self, game_state: dict) -> str:
         if sample > eps_threshold:
             round += 1
             with torch.no_grad():
-                action_done = torch.argmax(self.policy_net(x1, x2, x3, x4))
+                # self.policy_net이 정의되어 있지 않아 보이나 원본 로직 유지
+                # 만약 policy_net이 없다면 model을 써야 함. 원본 코드의 문맥상 model이 쓰일 수도 있음.
+                if hasattr(self, 'policy_net'):
+                    action_done = torch.argmax(self.policy_net(x1, x2, x3, x4))
+                else:
+                    # fallback to model (loaded from pickle)
+                    # pickle로 로드된 모델이 어떤 타입인지(torch model or numpy array)에 따라 다름
+                    # 여기서는 원본 코드를 최대한 존중
+                    if isinstance(self.model, torch.nn.Module):
+                         action_done = torch.argmax(self.model(x1, x2, x3, x4))
+                    else:
+                         # 확률 분포인 경우 (초기 랜덤 설정 시)
+                         action_done = np.argmax(self.model) 
         else:
             round += 1
             action_done = torch.tensor([[np.random.choice([i for i in range(0, 6)], p=[.2, .2, .2, .2, .1, .1])]],
-                                       dtype=torch.long, device=device)
+                                        dtype=torch.long, device=device)
     else:
         # 평가 모드
-        action_done = torch.argmax(self.model(x1, x2, x3, x4))
+        if isinstance(self.model, torch.nn.Module):
+             action_done = torch.argmax(self.model(x1, x2, x3, x4))
+        elif isinstance(self.model, np.ndarray):
+             # setup에서 pickle.load로 불러온 것이 numpy array라면
+             # 하지만 보통 torch 모델일 것임.
+             # 원본 코드: torch.argmax(self.model(x1, x2, x3, x4)) -> torch 모델 가정
+             action_done = torch.argmax(self.model(x1, x2, x3, x4))
+        else:
+             # 기타 타입일 경우 (예: 커스텀 클래스)
+             action_done = torch.argmax(self.model(x1, x2, x3, x4))
     
-    return ACTIONS[action_done]
+    # 텐서에서 정수로 변환 필요
+    if isinstance(action_done, torch.Tensor):
+        action_index = action_done.item()
+    else:
+        action_index = action_done
+
+    return ACTIONS[action_index]
 
 def state_to_features(game_state: dict) -> np.array:
     field = game_state["field"]

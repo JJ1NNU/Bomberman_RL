@@ -47,11 +47,12 @@ def setup(self):
     self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     self.feature = Feature()
 
-    # [추가] Loop Breaker 및 좌표 추적을 위한 초기화
+    # [추가] Loop Breaker 및 좌표/행동 추적을 위한 초기화
     self.coordinate_history = deque(maxlen=20)
+    self.action_history = deque(maxlen=20) 
     self.step = 0
     
-    # [추가] Act에서 사용하는 변수 안전 초기화 (원본 코드에 누락된 경우 대비)
+    # [추가] Act에서 사용하는 변수 안전 초기화
     if not hasattr(self, 'epsilon'):
         self.epsilon = 0.1
     if not hasattr(self, 'steps_done'):
@@ -60,13 +61,15 @@ def setup(self):
     if not self.train:
         # 모델 로드 실패 대비
         if os.path.isfile("my-saved-model.pt"):
-            with open("my-saved-model.pt", "rb") as file:
-                self.policy_net = pickle.load(file).to(self.device)
-            self.logger.info("Loading model from saved state.")
+            try:
+                with open("my-saved-model.pt", "rb") as file:
+                    self.policy_net = pickle.load(file).to(self.device)
+                self.logger.info("Loading model from saved state.")
+            except Exception as e:
+                self.logger.warning(f"Error loading model: {e}")
+                self.policy_net = None
         else:
             self.logger.warning("Model file not found! Training mode or broken setup?")
-            # Fallback: 모델이 없으면 act에서 에러나므로 더미 모델이라도 있어야 함
-            # 하지만 보통은 학습된 파일이 있다고 가정.
             self.policy_net = None 
 
 def act(self, game_state: dict) -> str:
@@ -79,9 +82,10 @@ def act(self, game_state: dict) -> str:
     self.step = game_state['step']
     self.x, self.y = game_state['self'][3]
 
-    # 좌표 히스토리 관리
+    # 좌표 및 행동 히스토리 관리
     if self.step == 1:
         self.coordinate_history.clear()
+        self.action_history.clear()
         
         # [원본 로직 유지] If train with itself (특정 조건에서 재 setup)
         if game_state["round"] % 500 == 0:
@@ -94,47 +98,61 @@ def act(self, game_state: dict) -> str:
     # -----------------------------------------------------------
     raw_action = _choose_action(self, game_state)
 
-    # -----------------------------------------------------------
-    # 3. [Early Game Check] & [Safety Shield]
-    # -----------------------------------------------------------
-    if self.step < 30:
-        # 초반 30스텝은 Safety Shield 끄기
-        final_action = raw_action
-    else:
-        # 30스텝 이후 Safety Shield 작동
-        try:
-            safe_actions = get_filtered_actions(game_state)
-        except Exception as e:
-            self.logger.error(f"Safety Shield Error: {e}")
-            safe_actions = [raw_action]
+    # [★ 추가] 상자 옆에서 멍때림 방지 (Deadlock Breaking with Bomb)
+    if game_state['self'][2] == True:
+        # 최근 5턴간 폭탄을 놓지 않음
+        recent_actions = list(self.action_history)[-5:]
+        if len(recent_actions) >= 5 and all(a != 'BOMB' for a in recent_actions):
+            # 상자 확인
+            x, y = game_state['self'][3]
+            field = game_state['field']
+            neighbors = [(x, y-1), (x, y+1), (x-1, y), (x+1, y)]
+            crate_nearby = any(field[nx, ny] == 1 for nx, ny in neighbors if 0 <= nx < field.shape[0] and 0 <= ny < field.shape[1])
             
-        # -----------------------------------------------------------
-        # 4. [Loop Breaker] (30스텝 이후)
-        # -----------------------------------------------------------
-        is_looping = False
-        is_safe_now = 'WAIT' in safe_actions
+            if crate_nearby:
+                try:
+                    # 안전 확인 (팀킬/자폭 방지)
+                    temp_safe_actions = get_filtered_actions(game_state, self.action_history)
+                    if 'BOMB' in temp_safe_actions:
+                        # self.logger.info("Force BOMB placement: Stuck next to crate & Safe to bomb.")
+                        raw_action = 'BOMB'
+                except Exception as e:
+                    self.logger.error(f"Bomb Check Error: {e}")
+
+    # -----------------------------------------------------------
+    # 3. [Safety Shield] & [Loop Breaker]
+    # -----------------------------------------------------------
+    # [수정] 30스텝 조건 제거 -> 항상 쉴드 켜짐
+    try:
+        # [수정] action_prune에 action_history 전달
+        safe_actions = get_filtered_actions(game_state, self.action_history)
+    except Exception as e:
+        self.logger.error(f"Safety Shield Error: {e}")
+        safe_actions = ['WAIT']
         
-        if is_safe_now and len(self.coordinate_history) >= 10:
-            history_list = list(self.coordinate_history)
-            recent_locs = set(history_list[-10:])
-            if len(recent_locs) <= 2:
-                is_looping = True
+    final_action = raw_action
+    
+    # 쉴드에 의해 원래 의도가 차단되었는지 확인
+    if raw_action not in safe_actions:
         
-        final_action = raw_action
-        
-        # 루프 탈출 또는 위험 행동 차단
-        if is_looping or (raw_action not in safe_actions):
-            if is_looping:
-                pass 
-            
-            if safe_actions:
-                safe_moves = [a for a in safe_actions if a != 'WAIT']
-                if safe_moves:
-                    final_action = np.random.choice(safe_moves)
-                else:
-                    final_action = np.random.choice(safe_actions)
-            else:
-                final_action = 'WAIT'
+        # [수정] 이동 의도였다면 폭탄 제외
+        if raw_action != 'BOMB':
+            candidate_actions = [a for a in safe_actions if a != 'BOMB' and a != 'WAIT']
+        else:
+            candidate_actions = [a for a in safe_actions if a != 'WAIT']
+
+        # 후보 선택
+        if candidate_actions:
+            final_action = np.random.choice(candidate_actions)
+        elif 'WAIT' in safe_actions:
+            final_action = 'WAIT'
+        elif safe_actions: 
+            final_action = np.random.choice(safe_actions)
+        else:
+            final_action = 'WAIT'
+
+    # [중요] 결정된 행동을 히스토리에 저장
+    self.action_history.append(final_action)
 
     if self.train:
         self.steps_done += 1

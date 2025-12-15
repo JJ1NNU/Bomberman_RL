@@ -43,8 +43,8 @@ def setup_training(self):
     self.episode_gathered_rewards = 0.0
     # Transactions
     self.transitions = deque(maxlen=TRANSITION_HISTORY_SIZE)
-    # Logging in wandb
-    wandb.init(project="bomberman_rl", entity="github")
+    # wandb disable
+    wandb.init(project="bomberman_rl", entity="github", mode="disabled")
 
 
 def game_events_occurred(self, old_game_state: dict, self_action: str, new_game_state: dict, events: List[str]):

@@ -10,19 +10,18 @@ import networkx as nx
 import numpy as np
 from sympy import exp, solve, symbols
 
+# [수정] action_prune 경로 설정 및 임포트
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from action_prune import get_filtered_actions
 
 from settings import COLS, ROWS
 
 Coordinate = Tuple[int]
-
 Graph = nx.Graph
 Action = str
 
 ACTIONS = ["UP", "RIGHT", "DOWN", "LEFT", "WAIT", "BOMB"]
 SHORTEST_PATH_ACTIONS = ACTIONS[:4]
-
 
 def setup(self) -> None:
     """Sets up everything. (First call)"""
@@ -38,22 +37,23 @@ def setup(self) -> None:
     self.rewards_of_episodes = []
     self.game_scores_of_episodes = []
     
-    # [추가] Loop Breaker 및 좌표 추적을 위한 초기화
+    # [추가] Loop Breaker 및 좌표/행동 추적을 위한 초기화
     self.coordinate_history = deque(maxlen=20)
+    self.action_history = deque(maxlen=20) # action_prune용
     self.step = 0
+    
     # [추가] exploration_rate가 정의되지 않았을 경우를 대비한 안전장치
     if not hasattr(self, 'exploration_rate'):
         self.exploration_rate = 0.0
 
     # find latest q_table
     list_of_q_tables = glob.glob("./q_tables/*.npy")
-    # (주의: 파일이 없으면 max에서 에러날 수 있으므로 체크)
     if list_of_q_tables:
         self.latest_q_table_path = max(list_of_q_tables, key=os.path.getctime)
         self.latest_q_table = np.load(self.latest_q_table_path)
         self.logger.info(f"Using q-table: {self.latest_q_table_path}")
     else:
-        self.latest_q_table_path = "" # 빈 문자열로 초기화
+        self.latest_q_table_path = "" 
 
     # train if flag is present or if there is no q_table present
     if self.train or (not list_of_q_tables and not os.path.isfile(self.latest_q_table_path)):
@@ -70,17 +70,15 @@ def setup(self) -> None:
         else:
             self.logger.info("Starting training from scratch")
             self.q_table = np.zeros(shape=(self.number_of_states, len(ACTIONS)))
-            # [수정] 훈련 시작 시 exploration rate 초기화
             self.exploration_rate = self.exploration_rate_initial
     else:
         self.logger.info("Using latest Q-Table for testing")
         if list_of_q_tables:
              self.q_table = self.latest_q_table
         else:
-             # Fallback for testing without model
              self.logger.warning("No Q-Table found for testing! Using random agent.")
              self.q_table = np.zeros(shape=(len(self.state_list), len(ACTIONS)))
-        self.exploration_rate = 0.0 # 테스트 모드에서는 탐험 없음
+        self.exploration_rate = 0.0
 
 def act(self, game_state: dict) -> str:
     """Takes in the current game state and returns the chosen action in form of a string."""
@@ -91,9 +89,11 @@ def act(self, game_state: dict) -> str:
     self.step = game_state['step']
     self.x, self.y = game_state['self'][3]
 
-    # 좌표 히스토리 관리
+    # 좌표 및 행동 히스토리 관리 (매 라운드 초기화)
     if self.step == 1:
         self.coordinate_history.clear()
+        self.action_history.clear()
+        
     self.coordinate_history.append((self.x, self.y))
 
     # Q-Learning State Update
@@ -107,53 +107,64 @@ def act(self, game_state: dict) -> str:
     # -----------------------------------------------------------
     raw_action = _choose_action(self, game_state, self.old_state)
 
-    # -----------------------------------------------------------
-    # 3. [Early Game Check] & [Safety Shield]
-    # -----------------------------------------------------------
-    if self.step < 30:
-        self.logger.info(f"Early Game (Step {self.step}): Safety Shield is OFF.")
-        final_action = raw_action
-    else:
-        # 30스텝 이후 Safety Shield 작동
-        try:
-            safe_actions = get_filtered_actions(game_state)
-        except Exception as e:
-            self.logger.error(f"Safety Shield Error: {e}")
-            safe_actions = [raw_action]
+    # [★ 추가] 상자 옆에서 멍때림 방지 (Deadlock Breaking with Bomb)
+    if game_state['self'][2] == True:
+        # 최근 5턴간 폭탄을 놓지 않음
+        recent_actions = list(self.action_history)[-5:]
+        if len(recent_actions) >= 5 and all(a != 'BOMB' for a in recent_actions):
+            # 상자 확인
+            x, y = game_state['self'][3]
+            field = game_state['field']
+            neighbors = [(x, y-1), (x, y+1), (x-1, y), (x+1, y)]
+            crate_nearby = any(field[nx, ny] == 1 for nx, ny in neighbors if 0 <= nx < field.shape[0] and 0 <= ny < field.shape[1])
             
-        # -----------------------------------------------------------
-        # 4. [Loop Breaker] (30스텝 이후)
-        # -----------------------------------------------------------
-        is_looping = False
-        is_safe_now = 'WAIT' in safe_actions
-        
-        if is_safe_now and len(self.coordinate_history) >= 10:
-            history_list = list(self.coordinate_history)
-            recent_locs = set(history_list[-10:])
-            if len(recent_locs) <= 2:
-                is_looping = True
-        
-        final_action = raw_action
-        
-        # 루프 탈출 또는 위험 행동 차단
-        if is_looping or (raw_action not in safe_actions):
-            if is_looping:
-                self.logger.info("Loop detected in SAFE state. Forcing random move.")
-            
-            if safe_actions:
-                safe_moves = [a for a in safe_actions if a != 'WAIT']
-                if safe_moves:
-                    final_action = np.random.choice(safe_moves)
-                else:
-                    final_action = np.random.choice(safe_actions)
-            else:
-                final_action = 'WAIT'
+            if crate_nearby:
+                try:
+                    # 안전 확인 (팀킬/자폭 방지)
+                    temp_safe_actions = get_filtered_actions(game_state, self.action_history)
+                    if 'BOMB' in temp_safe_actions:
+                        self.logger.info("Force BOMB placement: Stuck next to crate & Safe to bomb.")
+                        raw_action = 'BOMB'
+                except Exception as e:
+                    self.logger.error(f"Bomb Check Error: {e}")
 
-    # [로그] 최종 행동 결정 로그
-    if final_action != raw_action:
+    # -----------------------------------------------------------
+    # 3. [Safety Shield] & [Loop Breaker]
+    # -----------------------------------------------------------
+    try:
+        # [수정] action_prune에 action_history 전달
+        safe_actions = get_filtered_actions(game_state, self.action_history)
+    except Exception as e:
+        self.logger.error(f"Safety Shield Error: {e}")
+        safe_actions = ['WAIT'] # 비상시 정지
+        
+    final_action = raw_action
+    
+    # 쉴드에 의해 원래 의도가 차단되었는지 확인
+    if raw_action not in safe_actions:
+        
+        # [수정] 이동 의도였다면 폭탄 제외
+        if raw_action != 'BOMB':
+            candidate_actions = [a for a in safe_actions if a != 'BOMB' and a != 'WAIT']
+        else:
+            candidate_actions = [a for a in safe_actions if a != 'WAIT']
+
+        # 후보 선택
+        if candidate_actions:
+            final_action = np.random.choice(candidate_actions)
+        elif 'WAIT' in safe_actions:
+            final_action = 'WAIT'
+        elif safe_actions: 
+            final_action = np.random.choice(safe_actions)
+        else:
+            final_action = 'WAIT'
+
         self.logger.info(f"Safety Shield Triggered! Intent: {raw_action} -> Adjusted: {final_action}")
     else:
         self.logger.debug(f"Action execute: {final_action}")
+
+    # [중요] 결정된 행동을 히스토리에 저장
+    self.action_history.append(final_action)
 
     return final_action
 
@@ -184,48 +195,21 @@ def _choose_action(self, game_state: dict, state: int) -> str:
     # 100% exploitation
     action = ACTIONS[np.argmax(self.q_table[state])]
     return action
-
 def list_possible_states() -> List[dict]:
-    """Creates a list of dicts of all possible state feature combinations (aka states)
-
-    Makes use of itertools.product(), which produces all possible combinations from lists of options.
-    Example: (1, 2), (3, 4, 5) -> (1,3), (1,4), (1,5), (2,3), (2,4), (2, 5)
-    The beginning tuples in this case are the possible values for each of our state features.
-    The resulting list of tuples gets converted into a list of dicts for easier human access later on.
-    """
     states = list(
         itertools.product(
-            (
-                "DOWN",
-                "UP",
-                "RIGHT",
-                "LEFT",
-            ),  # coin direction  - kind of a "fall back" when there's nothing else to do
-            (
-                "CLEAR",
-                "DOWN",
-                "UP",
-                "RIGHT",
-                "LEFT",
-            ),  # bomb safety direction  - highest priority in rewards
-            (False, True),  # in enemy zone
-            (
-                False,
-                True,
-            ),  # is it safe to drop a bomb? - if in enemy zone and safe to bomb ... if many crates and safe to bomb ...
-            (
-                "ZERO",
-                "LOW",
-                "HIGH",
-            ),  # how many surrounding crates are there (and how close are they?) - high bomb dropping reward when this is high
-            ("FREE", "BLOCKED"),  # is the next tile in the four directions free to move to
+            ("DOWN", "UP", "RIGHT", "LEFT"),
+            ("CLEAR", "DOWN", "UP", "RIGHT", "LEFT"),
+            (False, True),
+            (False, True),
+            ("ZERO", "LOW", "HIGH"),
+            ("FREE", "BLOCKED"),
             ("FREE", "BLOCKED"),
             ("FREE", "BLOCKED"),
             ("FREE", "BLOCKED"),
         )
     )
 
-    # Conversion into dict via position in the tuples (becuause of this, order matters)
     state_dicts = []
     for vector in states:
         state_dict = {
@@ -242,10 +226,7 @@ def list_possible_states() -> List[dict]:
         state_dicts.append(state_dict)
     return state_dicts
 
-
 def _determine_exploration_decay_rate(self) -> float:
-    """Determines the appropriate decay rate s.t. self.exploration_rate_end (approximately) is
-    reached after self.n_rounds."""
     x = symbols("x", real=True)
     expr = (
         self.exploration_rate_end
@@ -255,16 +236,7 @@ def _determine_exploration_decay_rate(self) -> float:
     self.logger.info(f"Determined exploration decay rate: {solution}")
     return float(solution)
 
-
 def _get_surrounding_tiles(own_coord: Coordinate, n: int) -> List[Coordinate]:
-    """Calculates all tiles surrounding self with Manhatten Distance n
-
-    For a starting position, finds every tile that can be reached in n steps,
-    i.e. that has a Manhatten Distance of n. Treats all tiles as available tiles,
-    even walls, bombs and (some) tiles outside the scope of the board.
-
-    Return only contains unique coordinates and includes starting coordinate.
-    """
     own_coord_x = own_coord[0]
     own_coord_y = own_coord[1]
     neighboring_coordinates = []
@@ -280,39 +252,18 @@ def _get_surrounding_tiles(own_coord: Coordinate, n: int) -> List[Coordinate]:
             neighboring_coordinates.append((own_coord_x - x, own_coord_y - y))
     return list(set(neighboring_coordinates))
 
-
 def _get_neighboring_tiles(own_coord: Coordinate, n: int) -> List[Coordinate]:
-    """Calculates n tiles around self in straight line
-
-    For a starting position, finds the n tiles in directions up, down, left right
-    (resulting in a total number of 4xn tiles returned).
-    Treats all tiles as available tiles, even walls, bombs and tiles outside the scope of the board.
-
-    Returns unique coordinates which don't include starting coordinate.
-    """
     own_coord_x = own_coord[0]
     own_coord_y = own_coord[1]
     neighboring_coordinates = []
     for i in range(1, n + 1):
-        neighboring_coordinates.append((own_coord_x, own_coord_y + i))  # down in the matrix
-        neighboring_coordinates.append((own_coord_x, own_coord_y - i))  # up in the matrix
-        neighboring_coordinates.append((own_coord_x + i, own_coord_y))  # right in the matrix
-        neighboring_coordinates.append((own_coord_x - i, own_coord_y))  # left in the matrix
+        neighboring_coordinates.append((own_coord_x, own_coord_y + i))
+        neighboring_coordinates.append((own_coord_x, own_coord_y - i))
+        neighboring_coordinates.append((own_coord_x + i, own_coord_y))
+        neighboring_coordinates.append((own_coord_x - i, own_coord_y))
     return neighboring_coordinates
 
-
-def _get_neighboring_tiles_until_wall(
-    own_coord: Coordinate, n: int, game_state: dict
-) -> List[Coordinate]:
-    """Calculates n tiles around self in straight line, stopping at walls
-
-    For a starting position, finds the n tiles in directions up, down, left right.
-    Includes all tile types except walls. When the first wall in a direction is detected,
-    the following tiles behind that wall aren't included anymore. This equals a
-    "bomb radius", e.g. the area in which a bomb can do damage.
-
-    Returns unique coordinates which don't include starting coordinate.
-    """
+def _get_neighboring_tiles_until_wall(own_coord: Coordinate, n: int, game_state: dict) -> List[Coordinate]:
     directions = ["N", "E", "S", "W"]
     own_coord_x, own_coord_y = own_coord[0], own_coord[1]
     all_good_fields = []
@@ -322,172 +273,60 @@ def _get_neighboring_tiles_until_wall(
         for i in range(1, n + 1):
             try:
                 if directions[d] == "N":
-                    if (
-                        game_state["field"][own_coord_x][own_coord_y + i] == 0
-                        or game_state["field"][own_coord_x][own_coord_y + i] == 1
-                    ):
+                    if (game_state["field"][own_coord_x][own_coord_y + i] == 0 or game_state["field"][own_coord_x][own_coord_y + i] == 1):
                         good_fields += [(own_coord_x, own_coord_y + i)]
-                    else:
-                        break
+                    else: break
                 elif directions[d] == "E":
-                    if (
-                        game_state["field"][own_coord_x + i][own_coord_y] == 0
-                        or game_state["field"][own_coord_x + i][own_coord_y] == 1
-                    ):
+                    if (game_state["field"][own_coord_x + i][own_coord_y] == 0 or game_state["field"][own_coord_x + i][own_coord_y] == 1):
                         good_fields += [(own_coord_x + i, own_coord_y)]
-                    else:
-                        break
+                    else: break
                 elif directions[d] == "S":
-                    if (
-                        game_state["field"][own_coord_x][own_coord_y - i] == 0
-                        or game_state["field"][own_coord_x][own_coord_y - i] == 1
-                    ):
+                    if (game_state["field"][own_coord_x][own_coord_y - i] == 0 or game_state["field"][own_coord_x][own_coord_y - i] == 1):
                         good_fields += [(own_coord_x, own_coord_y - i)]
-                    else:
-                        break
+                    else: break
                 elif directions[d] == "W":
-                    if (
-                        game_state["field"][own_coord_x - i][own_coord_y] == 0
-                        or game_state["field"][own_coord_x - i][own_coord_y] == 1
-                    ):
+                    if (game_state["field"][own_coord_x - i][own_coord_y] == 0 or game_state["field"][own_coord_x - i][own_coord_y] == 1):
                         good_fields += [(own_coord_x - i, own_coord_y)]
-                    else:
-                        break
+                    else: break
             except IndexError:
                 break
-
         all_good_fields += good_fields
-
     return all_good_fields
 
-
 def _get_graph(self, game_state: dict, crates_as_obstacles=True) -> Graph:
-    """Converts game_state into a Graph object.
-
-    Every coordinate of a free tile is regarded as a node.
-
-    Considers walls, bombs and active explosions as "non-free" tiles meaning they
-    are not regarded as nodes and hence are not part of the graph.
-
-    If crates_as_obstacles is True, crates are regarded as obstacles, else they
-    are regarded as free tiles (i.e. they are part of the graph).
-
-    Returns a Graph object.
-    """
-
     if crates_as_obstacles:
-        # walls and crates are obstacles
         obstacles = [index for index, field in np.ndenumerate(game_state["field"]) if field != 0]
-
     else:
-        # only walls are obstacles
         obstacles = [index for index, field in np.ndenumerate(game_state["field"]) if field == -1]
 
-    # explosions are always obstacles
-    active_explosions = [
-        index for index, field in np.ndenumerate(game_state["explosion_map"]) if field != 0
-    ]
-
-    # bombs are always obstacles
-    bombs = [
-        coordinate
-        for coordinate, _ in game_state["bombs"]
-        if coordinate != game_state["self"][-1]
-        and coordinate not in [other_agent[-1] for other_agent in game_state["others"]]
-    ]
+    active_explosions = [index for index, field in np.ndenumerate(game_state["explosion_map"]) if field != 0]
+    bombs = [coordinate for coordinate, _ in game_state["bombs"] if coordinate != game_state["self"][-1] and coordinate not in [other_agent[-1] for other_agent in game_state["others"]]]
 
     obstacles += active_explosions
     obstacles += bombs
-
     self.logger.debug(f"Obstacles: {obstacles}")
 
     graph = nx.grid_2d_graph(m=COLS, n=ROWS)
-
-    # inplace operation
-    graph.remove_nodes_from(obstacles)  # removes nodes and any edges of all removed nodes
+    graph.remove_nodes_from(obstacles)
     return graph
 
-
 def _find_shortest_path(graph: Graph, a: Coordinate, b: Coordinate) -> Tuple[Graph, int]:
-    """Calclulates length of shortest path between points a and b in the graph at current time step.
-
-    The calculation is based on the Dijkstra algorithm and is time-independent (i.e. the calculation
-    only considers the current state and does not make assumptions about future movements)
-
-    Returns a tuple of the shortest path (as a Graph object that contains the nodes of the shortest
-    path) and the length of the shortest path.
-    """
-    # use Djikstra to find shortest path
     shortest_path = nx.shortest_path(graph, source=a, target=b, weight=None, method="dijkstra")
-    shortest_path_length = len(shortest_path) - 1  # because path considers self as part of the path
+    shortest_path_length = len(shortest_path) - 1
     return shortest_path, shortest_path_length
 
-
 def _get_action(self, self_coord: Coordinate, shortest_path: Graph) -> Action:
-    """Determines next agent action necessary to follow a given shortest path.
-
-    Given a coordinate and the shortest path (as a Graph object that contains the nodes of the
-    shortest path), returns UP, DOWN, LEFT or RIGHT depending on what the next move should be
-    in order to follow the path.
-    """
-    goal_coord = shortest_path[1]  # 0th element is self_coord
-
+    goal_coord = shortest_path[1]
     self.logger.info(f"Determined goal at {goal_coord} from shortest path feature")
-
-    # if x-coord is the same
     if self_coord[0] == goal_coord[0]:
-        if self_coord[1] + 1 == goal_coord[1]:
-            return "DOWN"
-
-        elif self_coord[1] - 1 == goal_coord[1]:
-            return "UP"
-
-    # if y-coord is the same
+        if self_coord[1] + 1 == goal_coord[1]: return "DOWN"
+        elif self_coord[1] - 1 == goal_coord[1]: return "UP"
     elif self_coord[1] == goal_coord[1]:
-        if self_coord[0] + 1 == goal_coord[0]:
-            return "RIGHT"
-
-        elif self_coord[0] - 1 == goal_coord[0]:
-            return "LEFT"
+        if self_coord[0] + 1 == goal_coord[0]: return "RIGHT"
+        elif self_coord[0] - 1 == goal_coord[0]: return "LEFT"
 
 
 def _shortest_path_feature(self, game_state: dict) -> Action:
-    """Combines path finding functions to determine direction to nearest coin/crate
-
-    Terminology:
-    - reachable: there is a path between a and b and crates are considered as obstacles
-    - unreachable: there is a path between a and b but crates are considered as free tiles, i.e. b is not
-    immediately reachable b/c there is at least one crate in the way. Note that when computing paths to crates,
-    by construction, we consider crates as free tiles. Hence all paths to crates are "unreachable".
-    - completely unreachable: there is no path between a and b even if considering crates as free tiles. This
-    can happen e.g. if there is an explosion that encircles the agent.
-
-    Computes the direction along the shortest path (can be shortest path to a coin or a crate) as follows:
-
-    - If no collectible coins and no crates exist --> random direction
-
-    - If no collectible coins but a crate exists and it is not completely unreachable --> direction towards nearest crate
-
-    - If one or more collectible coins:
-
-        if all coins are completely unreachable for us:
-            --> random direction
-
-        elif all coins are unreachable from our position:
-            --> towards unreachable nearest coin (thus towards first crate that's in the way)
-
-        elif exactly one coin is reachable from our position:
-            # even though there might be a coin that's much closer but
-            # blocked or someone else is closer
-            --> towards that coin
-
-        elif more than one coin reachable from our position:
-            try:
-                --> towards nearest coin that no other agent is closer to
-
-            except there is no coin that our agent is nearest to:
-                --> towards nearest coin no matter if it's reachable or not
-    """
     graph = _get_graph(self, game_state)
     graph_with_crates = _get_graph(self, game_state, crates_as_obstacles=False)
 

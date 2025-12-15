@@ -9,10 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==========================================
 AGENT_POOL = [
     "expert_2",
-    "hung_ry_agent",
-    "the_second_agent_to_rule_them_all",
-    "agent_fred2",
-    "feature_is_everything"
+    "hung_ry_agent"
 ]
 
 # 동시에 실행할 프로세스 수 (CPU 코어 수에 맞춰 조절, 보통 4~8)
@@ -102,4 +99,4 @@ if __name__ == "__main__":
         exit(1)
         
     # 리플레이 저장이 필요하면 True로 설정
-    run_league(num_matches=50, save_replay=False)
+    run_league(num_matches=1000, save_replay=False)

@@ -1,0 +1,6 @@
+Tested agent for 100 rounds 
+Score: 133. Average: 1.33. Std: 1.1406577050105786
+Kills: 0. Average: 0.0
+Coins: 133. Average: 1.33
+Deaths: 100 Average: 1.0
+Crates: 1532 Average: 15.32

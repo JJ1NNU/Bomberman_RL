@@ -1,0 +1,10 @@
+Q table has 235329 different states 
+Feature weigths: [ 0.1 10.   1.   1.   1.  10.   1. ] 
+Feature shapes: 
+Feature 0: (1,) 
+Feature 1: (2,) 
+Feature 2: (1,) 
+Feature 3: (2,) 
+Feature 4: (1,) 
+Feature 5: (5,) 
+Feature 6: (2,) 
