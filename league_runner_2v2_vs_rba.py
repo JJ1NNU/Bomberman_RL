@@ -9,11 +9,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==========================================
 AGENT_POOL = [
     "expert_2",
-    "hung_ry_agent"
+    "rule_based_agent"
 ]
 
 # 동시에 실행할 프로세스 수 (CPU 코어 수에 맞춰 조절, 보통 4~8)
-MAX_WORKERS = 4
+MAX_WORKERS = 1
 
 def run_match(team1_agents, team2_agents, match_id, training_mode=False, save_replay=True):
     """
@@ -33,7 +33,7 @@ def run_match(team1_agents, team2_agents, match_id, training_mode=False, save_re
     cmd = [
         "python", "main.py", "play",
         "--agents", *agents_args,
-        "--n-rounds", "100",            
+        "--n-rounds", "20",            
         "--train", train_arg,          
         "--no-gui",                    
         "--match-name", f"league_{match_id}", 
@@ -48,8 +48,14 @@ def run_match(team1_agents, team2_agents, match_id, training_mode=False, save_re
     print(f"[{start_time}] Match {match_id} STARTED: {team1_agents} vs {team2_agents}")
     
     try:
-        # capture_output=True를 쓰면 로그가 너무 길어질 수 있으니 필요시 조정
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            cmd, 
+            check=True, 
+            stdout=subprocess.DEVNULL,  # 출력 버림 (메모리 절약, 병목 해결)
+            stderr=subprocess.PIPE,     # 에러만 잡음
+            text=True
+        )
+        
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Match {match_id} FINISHED")
         return True
     except subprocess.CalledProcessError as e:
@@ -80,7 +86,7 @@ def run_league(num_matches=50, save_replay=True):
                 team1_agents=team1, 
                 team2_agents=team2, 
                 match_id=i, 
-                training_mode=True,  # 평가데이터는 league_runner_2v2.py에서 모으자. 여긴 학습용.
+                training_mode=False,  # 평가데이터는 league_runner_2v2.py에서 모으자. 여긴 학습용.
                 save_replay=save_replay
             )
             match_tasks.append(future)
@@ -99,4 +105,4 @@ if __name__ == "__main__":
         exit(1)
         
     # 리플레이 저장이 필요하면 True로 설정
-    run_league(num_matches=1000, save_replay=False)
+    run_league(num_matches=1, save_replay=False)

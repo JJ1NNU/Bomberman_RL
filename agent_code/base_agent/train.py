@@ -50,7 +50,7 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
 
     :param self: The same object that is passed to all of your callbacks.
     """
-    self.logger.debug(f'Encountered event(s) {", ".join(map(repr, events))} in final step')
+    # self.logger.debug(f'Encountered event(s) {", ".join(map(repr, events))} in final step')
     #self.transitions.append(Transition(state_to_features(last_game_state), last_action, None, reward_from_events(self, events)))
     self.rounds += 1
 
@@ -64,20 +64,20 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: List[str
         return
 
 
-    if e.KILLED_SELF in events:
-        print("SUICIDE")
-    elif e.GOT_KILLED in events:
-        print("DIED")
+    # if e.KILLED_SELF in events:
+    #     print("SUICIDE")
+    # elif e.GOT_KILLED in events:
+    #     print("DIED")
         # input()
 
     visited_states = len(self.Q_table)
     last_step = last_game_state['step']
-    print(f"Game ended at step: {last_step}")
-    print(f"Visited states: {visited_states}")
+    # print(f"Game ended at step: {last_step}")
+    # print(f"Visited states: {visited_states}")
     user_score = last_game_state['self'][1]
     others_score = [agent[1] for agent in last_game_state["others"]]
-    print(f"Score: {user_score}. Enemy scores: {others_score}")
-    print("--------------------------------------------------------------------\n")
+    # print(f"Score: {user_score}. Enemy scores: {others_score}")
+    # print("--------------------------------------------------------------------\n")
     self.visited_states.append(visited_states)
     self.scores.append(user_score)
 

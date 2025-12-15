@@ -56,6 +56,10 @@ class GenericWorld:
 
         self.running = False
 
+        # [★ 추가] IRL 데이터 수집용 컨테이너
+        # { "agent_name": [ (game_state, action), ... ] }
+        self.collected_irl_data = {} 
+
     def setup_logging(self):
         self.logger = logging.getLogger('BombeRLeWorld')
         self.logger.setLevel(s.LOG_GAME)
@@ -90,6 +94,9 @@ class GenericWorld:
 
         for agent in self.active_agents:
             agent.start_round()
+
+        # [★ 추가] 라운드 시작 시 데이터 수집기 초기화
+        self.collected_irl_data = {agent.name: [] for agent in self.agents}
 
         self.replay = {
             'round': new_round,
@@ -270,8 +277,88 @@ class GenericWorld:
     def end_round(self):
         if not self.running:
             raise ValueError('End-of-round requested while no round was running')
-        # Wait in case there is still a game step running
         self.running = False
+
+        # 1. 팀별 점수 및 생존자 집계
+        team1_score = 0
+        team2_score = 0
+        team1_alive = 0
+        team2_alive = 0
+        
+        team1_agents = []
+        team2_agents = []
+
+        for i, a in enumerate(self.agents):
+            # Team 구분 (인덱스 0,1 -> Team 1 / 2,3 -> Team 2)
+            if i < 2: 
+                team1_score += a.score
+                if not a.dead: team1_alive += 1
+                team1_agents.append(a)
+            else:
+                team2_score += a.score
+                if not a.dead: team2_alive += 1
+                team2_agents.append(a)
+
+            # 통계 기록 (기존 코드)
+            a.note_stat("score", a.score)
+            a.note_stat("rounds")
+
+        # 2. 승리 팀 판정 logic
+        winning_team = None # 1 or 2 or None(Draw)
+        winning_team_score = 0 # 승리 팀 점수 저장용
+        
+        # 전멸 승리 체크
+        if team1_alive > 0 and team2_alive == 0:
+            winning_team = 1
+            winning_team_score = team1_score
+        elif team2_alive > 0 and team1_alive == 0:
+            winning_team = 2
+            winning_team_score = team2_score
+        else:
+            # 시간 종료 혹은 둘 다 전멸/생존 시 점수 대결
+            if team1_score > team2_score:
+                winning_team = 1
+                winning_team_score = team1_score
+            elif team2_score > team1_score:
+                winning_team = 2
+                winning_team_score = team2_score
+            else:
+                winning_team = None # 무승부
+
+        # 3. 승리 팀 데이터 저장 (IRL 전문가 데이터)
+        # 조건 추가: 승리했더라도 팀 합산 점수가 6점 미만이면 저장 안 함
+        MIN_TEAM_SCORE = 10
+
+        if winning_team is not None and winning_team_score >= MIN_TEAM_SCORE:
+            # 승리한 팀의 에이전트들만 선택
+            winners = team1_agents if winning_team == 1 else team2_agents
+            
+            save_dir = "dataset/expert_raw"
+            os.makedirs(save_dir, exist_ok=True)
+            
+            for agent in winners:
+                # 에이전트별 데이터가 존재하는지 확인
+                if agent.name in self.collected_irl_data and len(self.collected_irl_data[agent.name]) > 0:
+                    
+                    # 파일명: WIN_Team1_TotalScore_AgentScore_Name_Date.pkl
+                    safe_name = agent.name.replace(" ", "_").replace("|", "_")
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                    
+                    # 파일명에 팀 점수와 개인 점수를 모두 기록하여 나중에 분석하기 좋게 함
+                    filename = f"WIN_Team{winning_team}_TeamScore{winning_team_score}_AgentScore{agent.score}_{safe_name}_{timestamp}.pkl"
+                    filepath = os.path.join(save_dir, filename)
+                    
+                    try:
+                        with open(filepath, "wb") as f:
+                            pickle.dump(self.collected_irl_data[agent.name], f)
+                        self.logger.info(f"[IRL] Saved WINNER data: {filename}")
+                    except Exception as e:
+                        self.logger.error(f"[IRL] Failed to save data: {e}")
+        else:
+             if winning_team is None:
+                 self.logger.info("[IRL] Draw game. No data saved.")
+             else:
+                 self.logger.info(f"[IRL] Win but low score ({winning_team_score} < {MIN_TEAM_SCORE}). No data saved.")
 
         for a in self.agents:
             a.note_stat("score", a.score)
@@ -335,6 +422,8 @@ class BombeRLeWorld(GenericWorld):
 
         self.rng = np.random.default_rng(args.seed)
         self.setup_agents(agents)
+        self.user_input = None
+        
 
     def setup_agents(self, agents):
         # Add specified agents and start their subprocesses
@@ -429,27 +518,46 @@ class BombeRLeWorld(GenericWorld):
     def poll_and_run_agents(self):
         # Tell agents to act
         for a in self.active_agents:
+            # 1. 에이전트 관점의 State 생성
             state = self.get_state_for_agent(a)
+            
+            # [★ 중요] State 저장을 위해 딥카피 혹은 그대로 사용 (pickle이 직렬화하므로 그대로 써도 무방)
+            # 나중에 action과 짝을 맞추기 위해 임시 저장하지 않고 바로 act() 호출
+            
             a.store_game_state(state)
             a.reset_game_events()
+            
             if a.available_think_time > 0:
                 a.act(state)
 
         # Give agents time to decide
         perm = self.rng.permutation(len(self.active_agents))
         self.replay['permutations'].append(perm)
+        
         for i in perm:
             a = self.active_agents[i]
             if a.available_think_time > 0:
                 try:
                     action, think_time = a.wait_for_act()
+                    
+                    # [★ 추가] 성공적으로 행동을 받아왔다면 여기서 데이터 수집!
+                    # state는 위에서 생성한 시점과 동일하므로 다시 생성해도 됨 (결정론적이면)
+                    # 하지만 가장 정확한 건 a.act() 호출 직전에 넘겨준 state여야 함.
+                    # a.store_game_state(state)로 내부에 저장했겠지만 접근이 어려울 수 있음.
+                    # 따라서 여기서 다시 get_state_for_agent(a)를 호출해서 저장 (순서상 큰 차이 없음)
+                    
+                    current_state = self.get_state_for_agent(a)
+                    
+                    if a.name not in self.collected_irl_data:
+                        self.collected_irl_data[a.name] = []
+                    
+                    self.collected_irl_data[a.name].append((current_state, action))
+
                 except KeyboardInterrupt:
-                    # Stop the game
                     raise
                 except:
                     if not self.args.silence_errors:
                         raise
-                    # Agents with errors cannot continue
                     action = "ERROR"
                     think_time = float("inf")
 
@@ -467,6 +575,10 @@ class BombeRLeWorld(GenericWorld):
                 self.logger.info(f'Skipping agent <{a.name}> because of last slow think time.')
                 a.available_think_time += a.base_timeout
                 action = "WAIT"
+                
+                # [★ 추가] WAIT 강제 시에도 데이터 저장할지 여부
+                # 보통 타임아웃이나 스킵은 학습 데이터로 부적절하므로 저장 안 함.
+                # 필요하다면 여기서도 저장 가능.
 
             self.replay['actions'][a.name].append(action)
             self.perform_agent_action(a, action)

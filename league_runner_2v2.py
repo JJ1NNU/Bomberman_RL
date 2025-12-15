@@ -8,15 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # [설정] 에이전트 풀 정의
 # ==========================================
 AGENT_POOL = [
-    "agent_the_destroyer_of_universes",
     "expert_1",
     "expert_2",
     "coin_collector_agent",
     "hung_ry_agent",
     "rule_based_agent",
     "the_second_agent_to_rule_them_all",
-    "agent_fred2",
-    "feature_is_everything"
+    "agent_fred2"
 ]
 
 # 동시에 실행할 프로세스 수 (CPU 코어 수에 맞춰 조절, 보통 4~8)
@@ -40,7 +38,7 @@ def run_match(team1_agents, team2_agents, match_id, training_mode=False, save_re
     cmd = [
         "python", "main.py", "play",
         "--agents", *agents_args,
-        "--n-rounds", "100",            
+        "--n-rounds", "20",            
         "--train", train_arg,          
         "--no-gui",                    
         "--match-name", f"league_{match_id}", 
@@ -106,4 +104,4 @@ if __name__ == "__main__":
         exit(1)
         
     # 리플레이 저장이 필요하면 True로 설정
-    run_league(num_matches=1, save_replay=False)
+    run_league(num_matches=100, save_replay=False)
